@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from basler_camera import BaslerCamera
+from basler_camera import DEFAULT_FORMAT, SUPPORTED_FORMATS, BaslerCamera
 
 # 预览区分辨率（像素），图像按比例缩放到该区域内显示
 PREVIEW_W, PREVIEW_H = 800, 600
@@ -47,6 +47,7 @@ class CaptureApp:
         self._timer_job = None            # 定时拍照的 after 任务 id，None 表示未启动
         self._timer_left = 0              # 定时拍照剩余张数
         self._saved_count = 0             # 本次运行已保存张数
+        self._timer_interval = 1.0        # 定时拍照间隔（秒），启动定时后由输入框覆盖
 
         root.title("Basler 相机采集")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -87,6 +88,13 @@ class CaptureApp:
         self.prefix_var = tk.StringVar(value=DEFAULT_PREFIX)
         ttk.Entry(box, textvariable=self.prefix_var, width=26).grid(row=1, column=1, padx=4, pady=2)
         ttk.Button(box, text="应用", width=6, command=self._apply_naming).grid(row=1, column=2)
+
+        ttk.Label(box, text="格式").grid(row=2, column=0, sticky="w")
+        self.fmt_var = tk.StringVar(value=DEFAULT_FORMAT)
+        fmt_combo = ttk.Combobox(box, textvariable=self.fmt_var, width=24, state="readonly",
+                                 values=list(SUPPORTED_FORMATS.keys()))
+        fmt_combo.grid(row=2, column=1, columnspan=2, padx=4, pady=2, sticky="w")
+        fmt_combo.bind("<<ComboboxSelected>>", lambda event: self._apply_naming())
 
         # 拍摄
         box = ttk.LabelFrame(panel, text="拍摄", padding=6)
@@ -159,14 +167,14 @@ class CaptureApp:
             return
         self.cam_label.config(text=f"相机：{info}", foreground="#080")
         self.cam.start()
-        self.cam.setup_save(self.dir_var.get(), self.prefix_var.get())
+        self.cam.setup_save(self.dir_var.get(), self.prefix_var.get(), self.fmt_var.get())
         self._sync_param("ExposureTime", "ExposureAuto", self.expo_entry, self.expo_var,
                          self.expo_auto_var, self.expo_info)
         self._sync_param("Gain", "GainAuto", self.gain_entry, self.gain_var,
                          self.gain_auto_var, self.gain_info)
         self._refresh_preview()
 
-    def _sync_param(self, value_node, auto_node, value_var, auto_var, info_label):
+    def _sync_param(self, value_node, auto_node, entry, value_var, auto_var, info_label):
         """功能：把相机当前的参数值与自动模式回读到界面控件。
         输入：value_node/auto_node：str，节点名；entry：Entry，数值输入框；
               value_var：StringVar，数值；auto_var：BooleanVar，自动状态；
@@ -192,7 +200,7 @@ class CaptureApp:
         frame = self.cam.get_latest_frame()
         if frame is not None:
             image = Image.fromarray(frame[:, :, ::-1])          # BGR -> RGB
-            image.thumbnail((PREVIEW_W, PREVIEW_H), Image.BILINEAR)
+            image.thumbnail((PREVIEW_W, PREVIEW_H), Image.Resampling.BILINEAR)
             self._photo = ImageTk.PhotoImage(image)             # 保留引用防止被回收
             self.preview.config(image=self._photo, text="")
         self.root.after(REFRESH_MS, self._refresh_preview)
@@ -210,7 +218,7 @@ class CaptureApp:
             self._apply_naming()
 
     def _apply_naming(self):
-        """功能：校验保存目录、应用前缀，并重置照片序号。
+        """功能：校验保存目录、应用前缀与格式，并重置照片序号。
         输入：无
         输出：无
         """
@@ -220,7 +228,7 @@ class CaptureApp:
         except OSError:
             messagebox.showerror("错误", f"无法创建文件夹：{save_dir}")
             return
-        start = self.cam.setup_save(save_dir, self.prefix_var.get().strip())
+        start = self.cam.setup_save(save_dir, self.prefix_var.get().strip(), self.fmt_var.get())
         self.saved_label.config(text=f"已保存 {self._saved_count} 张，下一张序号 {start}")
 
     def snap_once(self):
@@ -296,7 +304,7 @@ class CaptureApp:
         if not self.cam.set_node_value(value_node, value):
             messagebox.showwarning("提示", f"相机不支持设置 {value_node}")
 
-    def _toggle_auto(self, auto_node, value_node, value_var, auto_var):
+    def _toggle_auto(self, auto_node, value_node, value_var, auto_var, entry):
         """功能：切换参数的自动 / 手动模式，切回手动时回读当前值。
         输入：auto_node/value_node：str，节点名；value_var：StringVar，数值；
               auto_var：BooleanVar，自动状态；entry：Entry，数值输入框

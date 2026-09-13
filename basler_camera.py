@@ -12,8 +12,16 @@ from pypylon import pylon
 # 显示用像素格式：把相机原始格式统一转成 BGR8，便于 OpenCV / PIL 处理
 DISPLAY_PIXEL_FORMAT = pylon.PixelType_BGR8packed
 
-# 保存图片的扩展名，无损格式；如需 BMP 改成 ".bmp" 即可
-IMAGE_EXT = ".png"
+# 可选的保存格式：界面显示名 -> 文件扩展名
+SUPPORTED_FORMATS = {
+    "PNG（无损）": ".png",
+    "BMP（无损）": ".bmp",
+    "TIFF（无损）": ".tiff",
+    "JPG（有损，体积小）": ".jpg",
+}
+
+# 默认保存格式
+DEFAULT_FORMAT = "PNG（无损）"
 
 
 class BaslerCamera:
@@ -40,6 +48,7 @@ class BaslerCamera:
         self._pending_save = 0                 # 待保存帧数，界面点一次拍摄加 1，采集线程取一帧减 1
         self._save_dir = ""                    # 当前保存文件夹
         self._prefix = ""                      # 当前文件名前缀
+        self._ext = SUPPORTED_FORMATS[DEFAULT_FORMAT]   # 当前保存格式的扩展名
         self._index = 1                        # 下一个要用的照片序号
 
     # ---------- 设备连接 ----------
@@ -143,7 +152,7 @@ class BaslerCamera:
         with self._lock:
             index = self._index
             self._index += 1
-        path = os.path.join(self._save_dir, f"{self._prefix}{index}{IMAGE_EXT}")
+        path = os.path.join(self._save_dir, f"{self._prefix}{index}{self._ext}")
         try:
             Image.fromarray(frame[:, :, ::-1]).save(path)   # 转成 RGB 后用 PIL 保存，兼容中文路径
         except Exception:
@@ -160,29 +169,31 @@ class BaslerCamera:
 
     # ---------- 拍摄与命名 ----------
 
-    def setup_save(self, save_dir, prefix):
-        """功能：设置保存文件夹与前缀，并把序号自动接到已有文件之后。
-        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀
+    def setup_save(self, save_dir, prefix, fmt):
+        """功能：设置保存文件夹、文件名前缀与图片格式，并把序号接到已有文件之后。
+        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀；
+              fmt：str，格式显示名，需是 SUPPORTED_FORMATS 的键
         输出：int，本次拍摄将使用的起始序号
         """
         self._save_dir = save_dir
         self._prefix = prefix
-        self._index = self._next_index(save_dir, prefix)
+        self._ext = SUPPORTED_FORMATS.get(fmt, SUPPORTED_FORMATS[DEFAULT_FORMAT])
+        self._index = self._next_index(save_dir, prefix, self._ext)
         return self._index
 
     @staticmethod
-    def _next_index(save_dir, prefix):
-        """功能：扫描文件夹中已有的“前缀+数字”文件，返回最大序号加一。
-        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀
+    def _next_index(save_dir, prefix, ext):
+        """功能：扫描文件夹中已有的“前缀+数字+扩展名”文件，返回最大序号加一。
+        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀；ext：str，扩展名如 ".png"
         输出：int，起始序号；文件夹不存在或无匹配文件时返回 1
         """
         if not os.path.isdir(save_dir):
             return 1
         biggest = 0
         for name in os.listdir(save_dir):
-            if not name.startswith(prefix) or not name.lower().endswith(IMAGE_EXT):
+            if not name.startswith(prefix) or not name.lower().endswith(ext):
                 continue
-            stem = name[: -len(IMAGE_EXT)][len(prefix):]
+            stem = name[: -len(ext)][len(prefix):]
             if stem.isdigit():
                 biggest = max(biggest, int(stem))
         return biggest + 1
