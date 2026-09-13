@@ -1,0 +1,238 @@
+"""Basler 相机封装：打开设备 / 读写曝光增益 / 后台连续采集 / 按序保存图片。
+
+界面层只需要调用本模块的公开方法，不直接接触 pypylon。
+"""
+
+import os
+import threading
+
+from PIL import Image
+from pypylon import pylon
+
+# 显示用像素格式：把相机原始格式统一转成 BGR8，便于 OpenCV / PIL 处理
+DISPLAY_PIXEL_FORMAT = pylon.PixelType_BGR8packed
+
+# 保存图片的扩展名，无损格式；如需 BMP 改成 ".bmp" 即可
+IMAGE_EXT = ".png"
+
+
+class BaslerCamera:
+    """单台 Basler 相机的采集封装。
+
+    属性：
+        camera：pylon.InstantCamera 实例，未打开时为 None
+        latest_frame：numpy 数组 (H, W, 3)，最近一帧 BGR 图像，可能为 None
+    """
+
+    def __init__(self):
+        """功能：初始化对象，创建格式转换器，不连接硬件。
+        输入：无
+        输出：无
+        """
+        self.camera = None                     # 相机句柄，None 表示未打开
+        self.latest_frame = None               # 最近一帧 BGR 图，供界面读取
+        self._lock = threading.Lock()          # 保护 latest_frame / _pending_save 的互斥锁
+        self._grabbing = False                 # 采集线程运行标志
+        self._thread = None                    # 采集线程对象
+        self._converter = pylon.ImageFormatConverter()
+        self._converter.OutputPixelFormat = DISPLAY_PIXEL_FORMAT
+        self._converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+        self._pending_save = 0                 # 待保存帧数，界面点一次拍摄加 1，采集线程取一帧减 1
+        self._save_dir = ""                    # 当前保存文件夹
+        self._prefix = ""                      # 当前文件名前缀
+        self._index = 1                        # 下一个要用的照片序号
+
+    # ---------- 设备连接 ----------
+
+    @staticmethod
+    def find_devices():
+        """功能：枚举当前连接的 Basler 相机。
+        输入：无
+        输出：list[str]，每台相机的型号(序列号)，无设备时返回空列表
+        """
+        try:
+            infos = pylon.TlFactory.GetInstance().EnumerateDevices()
+            return [f"{d.GetModelName()}({d.GetSerialNumber()})" for d in infos]
+        except Exception:
+            return []
+
+    def open(self):
+        """功能：打开第一台可用相机并设为连续自由采集模式。
+        输入：无
+        输出：str，成功时返回“型号(序列号)”，失败时返回空字符串
+        """
+        try:
+            tl_factory = pylon.TlFactory.GetInstance()
+            self.camera = pylon.InstantCamera(tl_factory.CreateFirstDevice())
+            self.camera.Open()
+            # 采集线程来不及取图时只保留最新帧，避免延迟累积
+            self.camera.MaxNumBuffer = 5
+            self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+        except Exception:
+            self.camera = None
+            return ""
+        return f"{self.camera.GetDeviceInfo().GetModelName()}({self.camera.GetDeviceInfo().GetSerialNumber()})"
+
+    def close(self):
+        """功能：停止采集线程并关闭相机。
+        输入：无
+        输出：无
+        """
+        self._grabbing = False
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        if self.camera is not None:
+            try:
+                if self.camera.IsGrabbing():
+                    self.camera.StopGrabbing()
+            except Exception:
+                pass
+            try:
+                self.camera.Close()
+            except Exception:
+                pass
+            self.camera = None
+
+    def start(self):
+        """功能：启动后台采集线程（需先 open 成功）。
+        输入：无
+        输出：无
+        """
+        if self.camera is None or self._grabbing:
+            return
+        self._grabbing = True
+        self._thread = threading.Thread(target=self._grab_loop, daemon=True)
+        self._thread.start()
+
+    # ---------- 采集线程 ----------
+
+    def _grab_loop(self):
+        """功能：采集线程主循环，取帧后按需保存并更新 latest_frame。
+        输入：无
+        输出：无
+        """
+        while self._grabbing:
+            try:
+                result = self.camera.RetrieveResult(200, pylon.TimeoutHandling_Return)
+            except Exception:
+                break
+            if result is None:
+                continue
+            try:
+                if not result.GrabSucceeded():
+                    continue
+                frame = self._converter.Convert(result).GetArray()
+                with self._lock:
+                    self.latest_frame = frame
+                    need_save = self._pending_save > 0
+                    if need_save:
+                        self._pending_save -= 1
+                if need_save:
+                    self._save_frame(frame)
+            finally:
+                result.Release()
+
+    def _save_frame(self, frame):
+        """功能：把一帧 BGR 图像按“前缀+序号”命名写入保存文件夹。
+        输入：frame：numpy 数组 (H, W, 3)，BGR 图像
+        输出：str，保存成功的完整路径；文件夹无效或写盘失败时返回空字符串
+        """
+        if not self._save_dir or not os.path.isdir(self._save_dir):
+            return ""
+        with self._lock:
+            index = self._index
+            self._index += 1
+        path = os.path.join(self._save_dir, f"{self._prefix}{index}{IMAGE_EXT}")
+        try:
+            Image.fromarray(frame[:, :, ::-1]).save(path)   # 转成 RGB 后用 PIL 保存，兼容中文路径
+        except Exception:
+            return ""
+        return path
+
+    def get_latest_frame(self):
+        """功能：取最近一帧的副本，供界面显示。
+        输入：无
+        输出：numpy 数组 (H, W, 3) 或 None（尚无图像）
+        """
+        with self._lock:
+            return None if self.latest_frame is None else self.latest_frame
+
+    # ---------- 拍摄与命名 ----------
+
+    def setup_save(self, save_dir, prefix):
+        """功能：设置保存文件夹与前缀，并把序号自动接到已有文件之后。
+        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀
+        输出：int，本次拍摄将使用的起始序号
+        """
+        self._save_dir = save_dir
+        self._prefix = prefix
+        self._index = self._next_index(save_dir, prefix)
+        return self._index
+
+    @staticmethod
+    def _next_index(save_dir, prefix):
+        """功能：扫描文件夹中已有的“前缀+数字”文件，返回最大序号加一。
+        输入：save_dir：str，保存文件夹；prefix：str，文件名前缀
+        输出：int，起始序号；文件夹不存在或无匹配文件时返回 1
+        """
+        if not os.path.isdir(save_dir):
+            return 1
+        biggest = 0
+        for name in os.listdir(save_dir):
+            if not name.startswith(prefix) or not name.lower().endswith(IMAGE_EXT):
+                continue
+            stem = name[: -len(IMAGE_EXT)][len(prefix):]
+            if stem.isdigit():
+                biggest = max(biggest, int(stem))
+        return biggest + 1
+
+    def request_save(self, count=1):
+        """功能：请求采集线程在接下来的若干帧上执行保存。
+        输入：count：int，需要保存的帧数，默认 1
+        输出：无
+        """
+        with self._lock:
+            self._pending_save += count
+
+    # ---------- 相机参数 ----------
+
+    def get_node_value(self, name):
+        """功能：读取相机某个参数节点的当前值。
+        输入：name：str，GenICam 节点名，如 "ExposureTime"
+        输出：节点值，节点不存在或不可读时返回 None
+        """
+        try:
+            node = getattr(self.camera, name)
+            if node is None or not node.IsReadable():
+                return None
+            return node.GetValue()
+        except Exception:
+            return None
+
+    def get_node_range(self, name):
+        """功能：读取相机某个参数节点的取值范围。
+        输入：name：str，GenICam 节点名
+        输出：tuple(min, max)，节点不存在或不可读时返回 None
+        """
+        try:
+            node = getattr(self.camera, name)
+            if node is None or not node.IsReadable():
+                return None
+            return (node.Min, node.Max)
+        except Exception:
+            return None
+
+    def set_node_value(self, name, value):
+        """功能：写入相机参数节点（节点不可写时自动跳过）。
+        输入：name：str，GenICam 节点名；value：目标值，数值或字符串枚举
+        输出：bool，写入成功 True，失败 False
+        """
+        try:
+            node = getattr(self.camera, name)
+            if node is None or not node.IsWritable():
+                return False
+            node.SetValue(value)
+            return True
+        except Exception:
+            return False
