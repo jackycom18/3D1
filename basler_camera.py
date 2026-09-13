@@ -118,16 +118,25 @@ class BaslerCamera:
 
     def _grab_loop(self):
         """功能：采集线程主循环，取帧后按需保存并更新 latest_frame。
+        超时未出图或单帧异常都不会终止循环，保证预览持续可用。
         输入：无
         输出：无
         """
+        camera = self.camera            # 固定本循环使用的相机句柄，避免与 close() 抢引用
+        if camera is None:
+            return
+        fails = 0                       # 连续取帧异常次数，用于判断相机是否掉线
         while self._grabbing:
             try:
-                result = self.camera.RetrieveResult(200, pylon.TimeoutHandling_Return)
+                result = camera.RetrieveResult(200, pylon.TimeoutHandling_Return)
             except Exception:
-                break
-            if result is None:
+                fails += 1
+                if fails > 50:          # 连续约 10 秒取不到帧，判定相机异常并退出
+                    break
                 continue
+            if result is None or not result.IsValid():   # 超时无数据，属正常情况
+                continue
+            fails = 0
             try:
                 if not result.GrabSucceeded():
                     continue
@@ -139,6 +148,8 @@ class BaslerCamera:
                         self._pending_save -= 1
                 if need_save:
                     self._save_frame(frame)
+            except Exception:
+                continue                # 单帧转换或保存异常不应拖垮整个采集
             finally:
                 result.Release()
 
@@ -214,36 +225,28 @@ class BaslerCamera:
         输出：节点值，节点不存在或不可读时返回 None
         """
         try:
-            node = getattr(self.camera, name)
-            if node is None or not node.IsReadable():
-                return None
-            return node.GetValue()
+            return getattr(self.camera, name).GetValue()
         except Exception:
             return None
 
     def get_node_range(self, name):
         """功能：读取相机某个参数节点的取值范围。
         输入：name：str，GenICam 节点名
-        输出：tuple(min, max)，节点不存在或不可读时返回 None
+        输出：tuple(min, max)，节点不存在或不是数值节点时返回 None
         """
         try:
             node = getattr(self.camera, name)
-            if node is None or not node.IsReadable():
-                return None
-            return (node.Min, node.Max)
+            return (node.GetMin(), node.GetMax())
         except Exception:
             return None
 
     def set_node_value(self, name, value):
-        """功能：写入相机参数节点（节点不可写时自动跳过）。
+        """功能：写入相机参数节点。
         输入：name：str，GenICam 节点名；value：目标值，数值或字符串枚举
         输出：bool，写入成功 True，失败 False
         """
         try:
-            node = getattr(self.camera, name)
-            if node is None or not node.IsWritable():
-                return False
-            node.SetValue(value)
+            getattr(self.camera, name).SetValue(value)
             return True
         except Exception:
             return False
