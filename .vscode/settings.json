@@ -1,0 +1,16 @@
+{
+  // 项目统一用 C:\python\.venv（Python 3.8，装着 opencv/numpy/open3d 等）
+  "python.defaultInterpreterPath": "C:\\python\\.venv\\Scripts\\python.exe",
+  // 兜底：解释器还没切过来时，也让语言服务器去 venv 的 site-packages 里找模块，保证补全可用
+  "python.analysis.extraPaths": ["C:\\python\\.venv\\Lib\\site-packages"],
+  // 集成终端打开时自动激活该 venv，不用再手动跑 activate.ps1
+  "python.terminal.activateEnvironment": true,
+  // Code Runner 的 Run Code 按钮不看解释器选择，默认调 PATH 上的 python（本机是 C:\Python314），这里直接钉死到 venv
+  "code-runner.executorMap": {
+    "python": "C:\\python\\.venv\\Scripts\\python.exe -u"
+  },
+  // 关掉"只运行选中片段"：否则光标选中几行(比如中文 docstring)时会把选中的文字写进 tempCodeRunnerFile.py 当源码跑，报 invalid character in identifier
+  "code-runner.ignoreSelection": true,
+  // 改到集成终端里跑，中文 print 不会乱码，也能 Ctrl+C 中断
+  "code-runner.runInTerminal": true
+}
