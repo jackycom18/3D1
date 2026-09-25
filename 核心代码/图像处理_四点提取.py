@@ -208,6 +208,25 @@ def _slope_points(pruned, k=CURV_K, topn=4, min_dist=MIN_DIST):
     return tuple((int(xy[i, 0]), int(xy[i, 1])) for i in picked)
 
 
+def _order_points(points):
+    """功能：把四个拐点按 左上→右上→右下→左下 排序。
+    输入：points：可迭代的 (x, y) 像素坐标，应为 4 个点
+    输出：list，[(x, y), ...] 按左上/右上/右下/左下顺序；点数不足 4 个时按原顺序返回
+    """
+    pts = list(points)
+    if len(pts) != 4:
+        return pts
+    arr = np.asarray(pts, np.float64)                    # (4,2) 像素坐标
+    dist = np.sum(arr ** 2, axis=1)                      # 到图像左上原点(0,0)的平方距离 sqrt(u²+v²)
+    tl = int(np.argmin(dist))                            # 左上：离原点最近
+    br = int(np.argmax(dist))                            # 右下：离原点最远
+    rest = [i for i in range(4) if i not in (tl, br)]    # 剩下两个顶点的下标
+    i0, i1 = rest
+    tr, bl = (i0, i1) if arr[i0, 0] >= arr[i1, 0] else (i1, i0)  # x 较大的是右上，另一个是左下
+    order = [tl, tr, br, bl]
+    return [(int(arr[i, 0]), int(arr[i, 1])) for i in order]
+
+
 def _draw_points(points, shape, radius=5):
     """功能：把拐点画在纯黑背景上（白色实心圆），用来肉眼核对位置。
     输入：points：可迭代的 (x, y) 拐点元组；shape：(h, w) 或 (h, w, c)，决定画布尺寸；
@@ -233,12 +252,12 @@ def _devide_area(img, area):
 
 
 def image_processing(path=IMAGE_DIR, out_npz=OUTPUT_NPZ):
-    """功能：批量处理文件夹内的 png，提取每张图的质点并以“文件名 → 质点数组”存成 npz。
+    """功能：批量处理文件夹内的 png，提取每张图的四个拐点，按图片顺序存成 npz。
     输入：path：str，图片文件夹路径；out_npz：str，结果 npz 保存路径
-    输出：dict，键为图片名(不含扩展名)，值为该图 (N, 2) float32 质点数组
+    输出：list，每个元素是该图四个拐点的 ((x, y), ...) 二维元组
     """
     files = sorted(glob.glob(os.path.join(path, "*.png")))
-    result = {}
+    result = []
     for file_path in files:
         gray = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
         cv2.namedWindow("gray",cv2.WINDOW_NORMAL)
@@ -263,11 +282,11 @@ def image_processing(path=IMAGE_DIR, out_npz=OUTPUT_NPZ):
         cv2.imwrite("_debug/pruned.png",pruned)
         num,label = cv2.connectedComponents(pruned,8)
         print(num)
-        points = _slope_points(pruned)
+        points = _order_points(_slope_points(pruned))
         cv2.imwrite("_debug/points.png", _draw_points(points, gray.shape))
-        result[os.path.splitext(os.path.basename(file_path))[0]] = points
+        result.append(tuple(points))
         print(f"{os.path.basename(file_path)}：拐点 {len(points)} 个")
-    np.savez_compressed(out_npz, **result)
+    np.savez_compressed(out_npz, points=result)
     return result
 
 
