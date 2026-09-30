@@ -7,10 +7,16 @@ import os
 import threading
 
 from PIL import Image
-from pypylon import pylon
 
-# 显示用像素格式：把相机原始格式统一转成 BGR8，便于 OpenCV / PIL 处理
-DISPLAY_PIXEL_FORMAT = pylon.PixelType_BGR8packed
+try:
+    from pypylon import pylon
+    PYLON_AVAILABLE = True                           # pypylon 是否可用；缺失时相机功能降级为不可用
+    # 显示用像素格式：把相机原始格式统一转成 BGR8，便于 OpenCV / PIL 处理
+    DISPLAY_PIXEL_FORMAT = pylon.PixelType_BGR8packed
+except ImportError:
+    pylon = None
+    PYLON_AVAILABLE = False
+    DISPLAY_PIXEL_FORMAT = None
 
 # 可选的保存格式：界面显示名 -> 文件扩展名
 SUPPORTED_FORMATS = {
@@ -22,6 +28,10 @@ SUPPORTED_FORMATS = {
 
 # 默认保存格式
 DEFAULT_FORMAT = "PNG（无损）"
+
+# 关闭自动曝光/增益后使用的固定起点值（标定要求亮度稳定，用户可通过界面再调整）
+DEFAULT_EXPOSURE_US = 10000.0   # 曝光时间，单位微秒
+DEFAULT_GAIN_DB = 0.0           # 增益，单位 dB，标定优先低噪点
 
 
 class BaslerCamera:
@@ -42,9 +52,11 @@ class BaslerCamera:
         self._lock = threading.Lock()          # 保护 latest_frame / _pending_save 的互斥锁
         self._grabbing = False                 # 采集线程运行标志
         self._thread = None                    # 采集线程对象
-        self._converter = pylon.ImageFormatConverter()
-        self._converter.OutputPixelFormat = DISPLAY_PIXEL_FORMAT
-        self._converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+        self._converter = None
+        if PYLON_AVAILABLE:
+            self._converter = pylon.ImageFormatConverter()
+            self._converter.OutputPixelFormat = DISPLAY_PIXEL_FORMAT
+            self._converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
         self._pending_save = 0                 # 待保存帧数，界面点一次拍摄加 1，采集线程取一帧减 1
         self._save_dir = ""                    # 当前保存文件夹
         self._prefix = ""                      # 当前文件名前缀
@@ -57,8 +69,10 @@ class BaslerCamera:
     def find_devices():
         """功能：枚举当前连接的 Basler 相机。
         输入：无
-        输出：list[str]，每台相机的型号(序列号)，无设备时返回空列表
+        输出：list[str]，每台相机的型号(序列号)，无设备或 pypylon 缺失时返回空列表
         """
+        if not PYLON_AVAILABLE:
+            return []
         try:
             infos = pylon.TlFactory.GetInstance().EnumerateDevices()
             return [f"{d.GetModelName()}({d.GetSerialNumber()})" for d in infos]
@@ -68,19 +82,58 @@ class BaslerCamera:
     def open(self):
         """功能：打开第一台可用相机并设为连续自由采集模式。
         输入：无
-        输出：str，成功时返回“型号(序列号)”，失败时返回空字符串
+        输出：str，成功时返回“型号(序列号)”，失败或 pypylon 缺失时返回空字符串
         """
+        if not PYLON_AVAILABLE:
+            self.camera = None
+            return ""
+        # 已打开则直接返回设备信息：重复点“连接”时设备已被本进程占用，
+        # 再走 CreateFirstDevice 会失败并把 camera 覆盖成 None，出现“能出图却显示断开”
+        if self.camera is not None:
+            try:
+                if self.camera.IsOpen():
+                    return self.device_info()
+            except Exception:
+                pass
         try:
             tl_factory = pylon.TlFactory.GetInstance()
             self.camera = pylon.InstantCamera(tl_factory.CreateFirstDevice())
             self.camera.Open()
+            # 标定场景：关闭自动曝光/自动增益，使用固定手动值，保证亮度稳定可复现
+            for auto_node in ("ExposureAuto", "GainAuto"):
+                try:
+                    getattr(self.camera, auto_node).SetValue("Off")
+                except Exception:
+                    pass
+            # 关闭自动后给固定曝光/增益起点，避免相机默认曝光过小导致画面全黑
+            try:
+                self.camera.ExposureTime.SetValue(DEFAULT_EXPOSURE_US)
+            except Exception:
+                pass
+            try:
+                self.camera.Gain.SetValue(DEFAULT_GAIN_DB)
+            except Exception:
+                pass
             # 采集线程来不及取图时只保留最新帧，避免延迟累积
             self.camera.MaxNumBuffer = 5
             self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
         except Exception:
             self.camera = None
             return ""
-        return f"{self.camera.GetDeviceInfo().GetModelName()}({self.camera.GetDeviceInfo().GetSerialNumber()})"
+        return self.device_info()
+
+    def device_info(self):
+        """功能：返回当前相机“型号(序列号)”，读取失败时返回空字符串。
+        输入：无
+        输出：str
+        """
+        if self.camera is None:
+            return ""
+        try:
+            info = self.camera.GetDeviceInfo()
+            return f"{info.GetModelName()}({info.GetSerialNumber()})"
+        except Exception:
+            return ""
 
     def close(self):
         """功能：停止采集线程并关闭相机。

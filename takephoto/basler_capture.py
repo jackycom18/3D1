@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from basler_camera import DEFAULT_FORMAT, SUPPORTED_FORMATS, BaslerCamera
+from basler_camera import DEFAULT_FORMAT, SUPPORTED_FORMATS, BaslerCamera  # pyright: ignore[reportImplicitRelativeImport]
 
 # 预览区分辨率（像素），图像按比例缩放到该区域内显示
 PREVIEW_W, PREVIEW_H = 800, 600
@@ -26,6 +26,21 @@ DEFAULT_PREFIX = "img"
 
 # 曝光 / 增益的自动模式枚举值（GenICam 标准）
 AUTO_ON, AUTO_OFF = "Continuous", "Off"
+
+# data 数据文件夹下按文件类型分的 9 个子目录
+DATA_SUBDIRS = ("calib_result", "centroids", "records", "初始四点坐标",
+                "ang_move", "H", "points", "z", "pointcloud")
+
+
+def _ensure_data_dirs(parent):
+    """功能：在 parent 下创建 data/ 及其 9 个类型子文件夹。
+    输入：parent：str，照片文件夹的父目录（工作目录）
+    输出：str，data 目录的绝对路径
+    """
+    data_dir = os.path.join(parent, "data")
+    for sub in DATA_SUBDIRS:
+        os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
+    return data_dir
 
 
 class CaptureApp:
@@ -48,11 +63,13 @@ class CaptureApp:
         self._timer_left = 0              # 定时拍照剩余张数
         self._saved_count = 0             # 本次运行已保存张数
         self._timer_interval = 1.0        # 定时拍照间隔（秒），启动定时后由输入框覆盖
+        self._preview_job = None          # 预览刷新的 after 任务 id，None 表示未在刷新
 
         root.title("Basler 相机采集")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_ui()
-        self._open_camera()
+        self._find_cameras()
+        self._open_camera()   # 打开窗口即自动连接并开始预览，避免“发现相机但未点连接”导致无图像
 
     # ---------- 界面搭建 ----------
 
@@ -73,7 +90,18 @@ class CaptureApp:
 
         # 相机状态
         self.cam_label = ttk.Label(panel, text="相机：未连接", foreground="#b00")
-        self.cam_label.pack(anchor="w", pady=(0, 8))
+        self.cam_label.pack(anchor="w")
+
+        # 相机管理（查找 / 连接 / 断开 + 设备列表）
+        box = ttk.LabelFrame(panel, text="相机管理", padding=6)
+        box.pack(fill="x", pady=4)
+        row = ttk.Frame(box)
+        row.pack(fill="x")
+        ttk.Button(row, text="查找", width=6, command=self._find_cameras).pack(side="left", padx=2)
+        ttk.Button(row, text="连接", width=6, command=self._open_camera).pack(side="left", padx=2)
+        ttk.Button(row, text="断开", width=6, command=self._disconnect).pack(side="left", padx=2)
+        self.device_label = ttk.Label(box, text="尚未查找相机", foreground="#666")
+        self.device_label.pack(anchor="w", pady=(4, 0))
 
         # 保存设置
         box = ttk.LabelFrame(panel, text="保存设置", padding=6)
@@ -156,6 +184,25 @@ class CaptureApp:
 
     # ---------- 相机 ----------
 
+    def _find_cameras(self):
+        """功能：枚举当前连接的相机，更新设备列表显示。
+        输入：无
+        输出：无
+        """
+        devices = BaslerCamera.find_devices()
+        if devices:
+            self.device_label.config(text="发现相机：" + "；".join(devices), foreground="#080")
+        else:
+            self.device_label.config(text="未发现相机（请检查电源与网线）", foreground="#b00")
+
+    def _disconnect(self):
+        """功能：断开当前相机并更新状态显示。
+        输入：无
+        输出：无
+        """
+        self.cam.close()
+        self.cam_label.config(text="相机：未连接", foreground="#b00")
+
     def _open_camera(self):
         """功能：打开相机，成功后读取曝光与增益的当前值与范围。
         输入：无
@@ -172,7 +219,8 @@ class CaptureApp:
                          self.expo_auto_var, self.expo_info)
         self._sync_param("Gain", "GainAuto", self.gain_entry, self.gain_var,
                          self.gain_auto_var, self.gain_info)
-        self._refresh_preview()
+        if self._preview_job is None:   # 已连接时不要重复启动预览循环
+            self._refresh_preview()
 
     def _sync_param(self, value_node, auto_node, entry, value_var, auto_var, info_label):
         """功能：把相机当前的参数值与自动模式回读到界面控件。
@@ -197,13 +245,18 @@ class CaptureApp:
         输入：无
         输出：无
         """
-        frame = self.cam.get_latest_frame()
-        if frame is not None:
-            image = Image.fromarray(frame[:, :, ::-1])          # BGR -> RGB
-            image.thumbnail((PREVIEW_W, PREVIEW_H), Image.Resampling.BILINEAR)
-            self._photo = ImageTk.PhotoImage(image)             # 保留引用防止被回收
-            self.preview.config(image=self._photo, text="")
-        self.root.after(REFRESH_MS, self._refresh_preview)
+        self._preview_job = None                                    # 本次回调已执行，清空任务记录
+        try:
+            frame = self.cam.get_latest_frame()
+            if frame is not None:
+                image = Image.fromarray(frame[:, :, ::-1])          # BGR -> RGB
+                image.thumbnail((PREVIEW_W, PREVIEW_H), Image.Resampling.BILINEAR)
+                self._photo = ImageTk.PhotoImage(image)             # 保留引用防止被回收
+                self.preview.config(image=self._photo, text="")
+        except Exception:
+            pass                                                   # 单帧处理异常不中断预览循环
+        if self._preview_job is None:                              # 只保留一个预览循环，避免重复连接后越刷越快
+            self._preview_job = self.root.after(REFRESH_MS, self._refresh_preview)
 
     # ---------- 保存与拍摄 ----------
 
@@ -228,6 +281,8 @@ class CaptureApp:
         except OSError:
             messagebox.showerror("错误", f"无法创建文件夹：{save_dir}")
             return
+        # 在照片文件夹父目录下自动创建 data 数据文件夹（含 9 个子目录）
+        _ensure_data_dirs(os.path.dirname(save_dir))
         start = self.cam.setup_save(save_dir, self.prefix_var.get().strip(), self.fmt_var.get())
         self.saved_label.config(text=f"已保存 {self._saved_count} 张，下一张序号 {start}")
 
@@ -331,6 +386,9 @@ class CaptureApp:
         if self._timer_job is not None:
             self.root.after_cancel(self._timer_job)
             self._timer_job = None
+        if self._preview_job is not None:
+            self.root.after_cancel(self._preview_job)
+            self._preview_job = None
         self.cam.close()
         self.root.destroy()
 
