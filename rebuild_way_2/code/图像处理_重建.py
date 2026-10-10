@@ -30,7 +30,7 @@ from scipy.interpolate import CubicSpline
 # ---------- 可调参数（数值按需手改） ----------
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_DIR = r"C:\python\3D_project_3\takephoto\images1"         # 输入图片文件夹
-CALIB_NPZ = r"C:\python\3D_project_3\calib_result1.npz"         # 鱼眼标定结果(K/D)路径
+CALIB_NPZ = r"C:\python\3D_project_3\rebuild_way_2\data\neican\calib_result.npz"   # 鱼眼标定结果(K/D)路径
 BALANCE = 0.0                   # 去畸变保留比例：0 完整保留(黑边多)，1 尽量填满(会裁掉部分内容)
 ADAPTIVE_BLOCK = 101           # 自适应二值化窗口(px，奇数)，量级取光条间距
 ADAPTIVE_C = -15               # 自适应二值化常数，阈值=局部均值-C，负值更严格

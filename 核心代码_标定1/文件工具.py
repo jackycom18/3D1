@@ -9,9 +9,9 @@ import re
 
 # data 下 9 个子文件夹名，按文件类型分类（与核心算法输出文件一一对应）
 DATA_SUBDIRS = (
-    "calib_result",   # 鱼眼标定结果 calib_resultN.npz
+    "neican",         # 鱼眼标定结果（内参）calib_resultN.npz
     "centroids",      # 四点交点像素坐标 centroidsN.npz
-    "records",        # 平移台 xy 移动记录 recordsN.npz
+    "xy",             # 平移台 xy 移动记录 xyN.npz
     "初始四点坐标",    # 初始四点现实坐标 初始四点坐标N.npz
     "ang_move",       # 位移台夹角 ang_moveN.npz
     "H",              # 单应矩阵 HN.npz

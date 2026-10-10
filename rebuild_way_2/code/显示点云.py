@@ -3,7 +3,7 @@
 功能：加载点云 → 按 z 深度着色 → 打印坐标范围 → 打开交互窗口。
       窗口操作：左键拖动旋转，滚轮缩放，Shift+左键平移，R 键复位视角。
 用法：
-    py -3.8 显示点云.py                 # 用默认路径（核心代码_标定2/pointcloud.ply）
+    py -3.8 显示点云.py                 # 用默认路径（rebuild_way_2/data/pointcloud/pointcloud_steger.ply）
     py -3.8 显示点云.py <文件路径>       # 指定 .ply 或 .npz 点云文件
 """
 
@@ -14,7 +14,7 @@ import numpy as np
 import open3d as o3d
 
 _HERE = os.path.dirname(os.path.abspath(__file__))                     # 本文件所在目录
-DEFAULT_PLY = os.path.join(_HERE, "核心代码_标定2", "pointcloud_steger.ply")  # 默认点云文件路径
+DEFAULT_PLY = os.path.join(os.path.dirname(_HERE), "data", "pointcloud", "pointcloud_steger.ply")  # 默认点云文件路径
 
 
 def load_pointcloud(path):

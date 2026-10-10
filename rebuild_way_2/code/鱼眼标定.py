@@ -16,7 +16,7 @@ import numpy as np
 
 # ---------- 可调参数 ----------
 CALIB_DIR = r"C:\python\3D_project_3\calib_images\images"    # 标定棋盘格照片文件夹
-OUT_NPZ = r"C:\python\3D_project_3\calib_result.npz"   # 标定结果保存路径
+OUT_NPZ = r"C:\python\3D_project_3\rebuild_way_2\data\neican\calib_result.npz"   # 标定结果保存路径
 BOARD_W = 9                  # 棋盘格内角点列数
 BOARD_H = 7                  # 棋盘格内角点行数
 SQUARE_MM = 13.0          # 单个格子的物理边长(mm)

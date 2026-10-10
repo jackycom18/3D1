@@ -13,15 +13,16 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 # ---------- 常量 ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))                     # 本文件所在目录（核心代码_标定2）
-CORE1_DIR = os.path.join(os.path.dirname(BASE_DIR), "核心代码_标定1")     # 标定1 目录，含 文件工具.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))                              # 本文件所在目录（rebuild_way_2/code）
+WORK_DIR = os.path.dirname(BASE_DIR)                                               # 工作目录（rebuild_way_2），data/ 在其下
+CORE1_DIR = os.path.join(os.path.dirname(os.path.dirname(BASE_DIR)), "核心代码_标定1")  # 标定1 目录，含 文件工具.py
 
 # 把标定1 目录加入搜索路径，供 z轴记录.py 内部 `import 文件工具` 解析
 if CORE1_DIR not in sys.path:
     sys.path.insert(0, CORE1_DIR)
 
 # 本目录下复用的处理模块路径
-_IMGPROC_PATH = os.path.join(BASE_DIR, "图像处理.py")                     # 标定2 复用
+_IMGPROC_PATH = os.path.join(BASE_DIR, "图像处理_四点提取.py")            # 标定2 复用
 _IMGPROC_REBUILD_PATH = os.path.join(BASE_DIR, "图像处理_重建.py")        # 重建复用
 
 # 配色
@@ -54,7 +55,7 @@ class Launcher:
     def __init__(self, root):
         self.root = root
         self.tools = _tools()
-        self.work_dir = tk.StringVar(value=BASE_DIR)       # 工作目录，产物存到其下 data/
+        self.work_dir = tk.StringVar(value=WORK_DIR)       # 工作目录，产物存到其下 data/
 
         root.title("结构光标定与重建")
         root.geometry("560x360")
@@ -115,7 +116,7 @@ class Launcher:
         输出：无
         """
         fish = _load("鱼眼标定", os.path.join(BASE_DIR, "鱼眼标定.py"))
-        cal2 = _load("标定2", os.path.join(BASE_DIR, "标定2.py"))
+        cal2 = _load("标定", os.path.join(BASE_DIR, "标定.py"))
 
         win = tk.Toplevel(self.root)
         win.title("标定")
@@ -154,7 +155,7 @@ class Launcher:
             if not cb_dir.get().strip():
                 status.config(text="请先选择棋盘格文件夹", fg="#e05555")
                 return
-            out = self.tools.next_path(os.path.join(data, "calib_result"), "calib_result", ".npz")
+            out = self.tools.next_path(os.path.join(data, "neican"), "calib_result", ".npz")
             fish.calibrate(path=cb_dir.get().strip(), out_npz=out)
             status.config(text=f"完成：鱼眼标定 → {out}", fg="#3cb371")
             btn2.config(state="normal")                          # 解锁第二步
@@ -182,12 +183,12 @@ class Launcher:
             if not imgs:
                 status.config(text="标定框文件夹内没有图片", fg="#e05555")
                 return
-            cb = latest("calib_result", "calib_result", ".npz")
+            cb = latest("neican", "calib_result", ".npz")
             if not cb:
                 status.config(text="缺少 calib_result，请先执行第一步", fg="#e05555")
                 return
             out = self.tools.next_path(os.path.join(data, "H"), "H", ".npz")
-            H = cal2.calibrate2(image_path=imgs[0], calib_npz=cb, out_npz=out, imgproc_path=_IMGPROC_PATH)
+            H = cal2.calibrate2(image_dir=d, calib_npz=cb, out_npz=out, imgproc_path=_IMGPROC_PATH)
             if H is not None:
                 status.config(text=f"完成：单应矩阵 H → {out}", fg="#3cb371")
             else:
@@ -242,7 +243,7 @@ class Launcher:
             if not img_dir.get().strip():
                 status.config(text="请先选择重建图片文件夹", fg="#e05555")
                 return
-            cb = latest("calib_result", "calib_result", ".npz")
+            cb = latest("neican", "calib_result", ".npz")
             h = latest("H", "H", ".npz")
             z = latest("z", "z", ".npz")
             missing = []
@@ -257,7 +258,7 @@ class Launcher:
                 return
             out = self.tools.next_path(os.path.join(data, "pointcloud"), "pointcloud", ".ply")
             try:
-                ply = recon.reconstruct(image_dir=img_dir.get().strip(), calib_npz=cb,
+                ply = recon.reconstruct(image_dir=img_dir.get().strip(),
                                         h_npz=h, z_npz=z, out_ply=out, proc_path=_IMGPROC_REBUILD_PATH)
             except Exception as exc:
                 status.config(text=f"失败：{exc}", fg="#e05555")

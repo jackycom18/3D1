@@ -24,11 +24,10 @@ import matplotlib.pyplot as plt
 
 # ---------- 路径（按需手改） ----------
 IMAGE_DIR = r"C:\python\3D_project_3\takephoto\images1"                  # 重建输入图片文件夹
-PROC_PATH = r"C:\python\3D_project_3\核心代码_标定2\图像处理_重建1.py"  # Steger 处理模块
-H_NPZ = r"C:\python\3D_project_3\核心代码_标定2\H.npz"                  # 像素->现实 单应矩阵
-Z_NPZ = r"C:\python\3D_project_3\核心代码_标定2\data\z\z.npz"          # z 坐标一维列表
-OUTPUT_PLY = r"C:\python\3D_project_3\核心代码_标定2\pointcloud_steger.ply"   # 输出 Steger 点云
-STANDARD_PLY = r"C:\python\3D_project_3\核心代码_标定2\pointcloud.ply"        # 覆盖标准点云
+PROC_PATH = r"C:\python\3D_project_3\rebuild_way_2\code\图像处理_重建.py"  # Steger 处理模块
+H_NPZ = r"C:\python\3D_project_3\rebuild_way_2\data\H\H.npz"              # 像素->现实 单应矩阵
+Z_NPZ = r"C:\python\3D_project_3\rebuild_way_2\data\z\z.npz"              # z 坐标一维列表
+OUTPUT_PLY = r"C:\python\3D_project_3\rebuild_way_2\data\pointcloud\pointcloud_steger.ply"   # 输出 Steger 点云
 
 
 def _load_module(path, name):
@@ -209,13 +208,11 @@ def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
 
     # 保存 PLY 点云文件
     _write_ply(pts, out_ply)
-    _write_ply(pts, STANDARD_PLY)
     print(f"\n三维点云构建完成！")
     print(f"总点数: {len(pts)} 个三维点")
 
     print(f"总耗时: {t_total:.2f} 秒 (平均每帧 {(t_total/len(files))*1000:.1f} ms)")
     print(f"已导出 PLY 文件: {out_ply}")
-    print(f"已同步更新: {STANDARD_PLY}")
 
     # 绘制高精度多视角可视化图像
     render_out = os.path.join(os.path.dirname(out_ply), "pointcloud_3d_view.png")

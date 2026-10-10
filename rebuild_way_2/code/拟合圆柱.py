@@ -14,7 +14,7 @@
 import os
 import numpy as np
 
-PTS = r"C:\python\3D_project_3\核心代码_标定2\pointcloud_steger.ply"   # 输入点云
+PTS = r"C:\python\3D_project_3\rebuild_way_2\data\pointcloud\pointcloud_steger.ply"   # 输入点云
 OUT_NPZ = r"C:\python\3D_project_3\cylinder_fit.npz"             # 拟合结果
 OUT_HTML = r"C:\python\3D_project_3\圆柱拟合报告.html"           # 可视化报告
 
