@@ -12,7 +12,7 @@ import re
 
 # ---------- 可调参数（数值按需手改） ----------
 
-IMAGE_DIR = r"C:\python\3D_project_3\images\images\images"           # 输入图片文件夹
+IMAGE_DIR = r"C:\python\3D_project_3\images\images"           # 输入图片文件夹
 CALIB_NPZ = r"C:\python\3D_project_3\calib_result1.npz"  # 鱼眼标定结果(K/D)保存路径
 BALANCE = 0.0                # 去畸变保留比例：0 完整保留(黑边多)，1 尽量填满
 ADAPTIVE_BLOCK = 101           # 自适应二值化窗口(px，奇数)，量级取光条间距
@@ -22,7 +22,7 @@ MIN_DIST = 50              # 拐点最小间距(px)：合并过近顶点时，�
 kernel = np.array([3,3])
 _NEIGHBORS8 = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))  # 8 邻域行列偏移
 MIN_LOOP_LEN = 700              # 闭合环长度阈值(px)：环长超过它才判定为真实结构并保留，否则换下一个分支点
-DEBUG_DIR = r"C:\python\3D_project_3\_debug"  # 拐点标红图保存目录
+STEGER_SIGMA = 2.5              # Steger 高斯核尺度，用于直边亚像素脊线提取
 
 
 def _remove_small(binary):
@@ -121,7 +121,7 @@ def _build_graph(skel):
                 if (ty, tx) in node_id:                     # 直接相邻节点：长度 1 的边，无中间点
                     j = node_id[(ty, tx)]
                     key = (min(i, j), max(i, j))
-                    edge_map.setdefault(key, []).append((1, []))
+                    edge_map.setdefault(key, []).append((1, [], i))
                     continue
                 path = []                                   # 沿中间点(deg==2)追踪到下一节点
                 cy, cx, prev = ty, tx, (ny, nx)
@@ -151,15 +151,51 @@ def _build_graph(skel):
                 if ok:
                     j = node_id[(cy, cx)]
                     key = (min(i, j), max(i, j))
-                    edge_map.setdefault(key, []).append((len(path) + 1, path))   # 边像素数 = 中间点数+1
+                    edge_map.setdefault(key, []).append((len(path) + 1, path, i))   # 记录原始走向起点 i
 
     adj = {i: [] for i in range(len(nodes))}
     for (a, b), segs in edge_map.items():
         segs.sort(key=lambda s: s[0])                       # 并行边按长度升序，只保留最短
-        length, pixels = segs[0]
-        adj[a].append((b, length, pixels))
-        adj[b].append((a, length, pixels))
+        length, pixels, origin = segs[0]
+        # 严格保持边的方向性：反向走时必须将中间点倒序 pixels[::-1]，杜绝空间折返跳跃
+        if origin == a:
+            adj[a].append((b, length, pixels))
+            adj[b].append((a, length, pixels[::-1]))
+        else:
+            adj[a].append((b, length, pixels[::-1]))
+            adj[b].append((a, length, pixels))
     return nodes, adj, branch_idx
+
+
+def _clean_to_single_pixel_cycle(cycle_pts):
+    """功能：消除闭合环上的对角冗余短路点，使环在栅格图像上处处度数严格为 2，成为真正的单像素环。
+    输入：cycle_pts：(P, 2) int32 闭环点序列
+    输出：(M, 2) int32 严格单像素宽的闭环点序列
+    """
+    if cycle_pts is None or len(cycle_pts) < 4:
+        return cycle_pts
+    pts = [tuple(p) for p in cycle_pts]
+    changed = True
+    while changed:
+        changed = False
+        new_pts = []
+        n = len(pts)
+        skip = set()
+        for i in range(n):
+            if (i - 1) % n in skip:
+                new_pts.append(pts[i])
+                continue
+            p_prev = pts[(i - 1) % n]
+            p_cur = pts[i]
+            p_next = pts[(i + 1) % n]
+            # 若前驱与后继在 8 邻域已直接相连，说明当前点属于对角冗余短路转折点，可安全剔除
+            if max(abs(p_prev[0] - p_next[0]), abs(p_prev[1] - p_next[1])) <= 1:
+                skip.add(i)
+                changed = True
+            else:
+                new_pts.append(p_cur)
+        pts = new_pts
+    return np.array(pts, np.int32)
 
 
 def _find_cycle(nodes, adj, start, min_len):
@@ -223,12 +259,13 @@ def _extract_main_cycle(skeleton, min_len=MIN_LOOP_LEN):
         return None
     deg = _degree(skel)
     if not (deg >= 3).any():                                # 无分支点：本身已是纯闭合环
-        return _trace_cycle(skel > 0)
+        tr = _trace_cycle(skel > 0)
+        return _clean_to_single_pixel_cycle(tr) if tr is not None else None
     nodes, adj, branch_idx = _build_graph(skel)             # 建图 + 并行边去重(保留最短)
     for i in branch_idx:                                    # 依次以每个分支点为起点找环
         cycle = _find_cycle(nodes, adj, i, min_len)         # 返回第一个环长>min_len 的环
         if cycle is not None:
-            return np.array(cycle, np.int32)
+            return _clean_to_single_pixel_cycle(np.array(cycle, np.int32))
     return None                                             # 无满足阈值的大环
 
 
@@ -260,14 +297,16 @@ def _trace_cycle(mask):
     return np.array(cycle, np.int32)
 
 
-def _corner_points_from_cycle(cycle, min_dist=MIN_DIST, trim_ratio=0.15):
+def _corner_points_from_cycle(cycle, gray=None, min_dist=MIN_DIST, trim_ratio=0.15, sigma=STEGER_SIGMA):
     """功能：用直线边缘拟合求解析交点法提取 4 拐点，彻底消灭细化的倒角内缩效应。
           1. 粗定位：利用 approxPolyDP 将闭合环点序列粗略分割为 4 条直边；
           2. 剔除过渡区：每条边丢弃两头靠近拐角的过渡点（默认 15%），只保留中间平直段；
-          3. 鲁棒拟合：对 4 条边的点分别拟合解析直线方程；
-          4. 解析求交：联立相邻两直线求解精确交点，向外还原真实几何顶点。
-    输入：cycle：(P, 2) int32，环上像素(行, 列)；min_dist：顶点最小间距(px)；
-          trim_ratio：float，每条边两头剔除的比例（默认 15%）
+          3. 数据源升级：在直边上计算纯 Steger 亚像素脊线点（过滤非凸、漂移或暗点，不合入灰度质心）；
+          4. 鲁棒拟合：对 4 条边的高精度亚像素点分别拟合解析直线方程；
+          5. 解析求交：联立相邻两直线求解精确交点，向外还原真实几何顶点。
+    输入：cycle：(P, 2) int32，环上像素(行, 列)；gray：去畸变灰度原图（提供时启动纯 Steger 亚像素）；
+          min_dist：顶点最小间距(px)；trim_ratio：float，每条边两头剔除的比例（默认 15%）；
+          sigma：float，Steger 高斯核尺度
     输出：tuple，元素为 (x, y) 拐点坐标（float 亚像素）；无法稳定得到 4 顶点时安全回退
     """
     if cycle is None or len(cycle) < 40:
@@ -288,8 +327,27 @@ def _corner_points_from_cycle(cycle, min_dist=MIN_DIST, trim_ratio=0.15):
     if approx is not None:
         indices = sorted([int(np.argmin(np.sum((pts_xy - apt) ** 2, axis=1))) for apt in approx])
 
+        # 若提供了灰度图，预先计算高斯一阶与二阶偏导数图
+        Ix, Iy, Ixx, Iyy, Ixy, roi_gray = None, None, None, None, None, None
+        if gray is not None:
+            radius = int(round(3 * sigma))
+            x_axis = np.arange(-radius, radius + 1, dtype=np.float64)
+            g0 = np.exp(-0.5 * (x_axis / sigma) ** 2)
+            g0 /= g0.sum()
+            g1 = -x_axis / (sigma ** 2) * g0
+            g2 = (x_axis ** 2 - sigma ** 2) / (sigma ** 4) * g0
+
+            roi_gray = gray.astype(np.float64)
+            Ix = cv2.sepFilter2D(roi_gray, cv2.CV_64F, g1, g0)
+            Iy = cv2.sepFilter2D(roi_gray, cv2.CV_64F, g0, g1)
+            Ixx = cv2.sepFilter2D(roi_gray, cv2.CV_64F, g2, g0)
+            Iyy = cv2.sepFilter2D(roi_gray, cv2.CV_64F, g0, g2)
+            Ixy = cv2.sepFilter2D(roi_gray, cv2.CV_64F, g1, g1)
+
         lines = []
         valid_lines = True
+        h, w = (gray.shape[:2]) if gray is not None else (0, 0)
+
         for k in range(4):
             i_start = indices[k]
             i_end = indices[(k + 1) % 4]
@@ -308,8 +366,47 @@ def _corner_points_from_cycle(cycle, min_dist=MIN_DIST, trim_ratio=0.15):
             if len(straight_segment) < 10:
                 straight_segment = edge
 
+            pts_to_fit = straight_segment
+            # 纯 Steger 亚像素提取（不使用灰度质心回退，不符合条件的点直接丢弃）
+            if gray is not None:
+                steger_pts = []
+                for pt in straight_segment:
+                    cx, cy = int(round(pt[0])), int(round(pt[1]))
+                    if not (0 <= cy < h and 0 <= cx < w):
+                        continue
+                    ix = Ix[cy, cx]
+                    iy = Iy[cy, cx]
+                    ixx = Ixx[cy, cx]
+                    iyy = Iyy[cy, cx]
+                    ixy = Ixy[cy, cx]
+
+                    trace = ixx + iyy
+                    diff = ixx - iyy
+                    disc = np.sqrt(diff * diff + 4.0 * ixy * ixy)
+                    lambda1 = 0.5 * (trace - disc)
+                    if lambda1 >= -0.05:  # 必须是凸脊线山脊点
+                        continue
+
+                    if abs(ixy) > 1e-7:
+                        nx = ixy
+                        ny = lambda1 - ixx
+                    else:
+                        nx, ny = (1.0, 0.0) if abs(ixx) >= abs(iyy) else (0.0, 1.0)
+                    norm = np.hypot(nx, ny)
+                    if norm < 1e-7:
+                        continue
+                    nx /= norm
+                    ny /= norm
+
+                    t = -(ix * nx + iy * ny) / lambda1
+                    if abs(t) <= 2.5 and roi_gray[cy, cx] >= 20:
+                        steger_pts.append([cx + t * nx, cy + t * ny])
+
+                if len(steger_pts) >= 15:
+                    pts_to_fit = np.array(steger_pts, dtype=np.float64)
+
             # M-estimator 鲁棒直线拟合 (vx, vy, x0, y0)
-            line = cv2.fitLine(straight_segment.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+            line = cv2.fitLine(pts_to_fit.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01).flatten()
             lines.append(line)
 
         if valid_lines and len(lines) == 4:
@@ -355,18 +452,6 @@ def _order_points(points):
     tr, bl = (i0, i1) if arr[i0, 0] >= arr[i1, 0] else (i1, i0)  # x 较大的是右上，另一个是左下
     order = [tl, tr, br, bl]
     return [(float(arr[i, 0]), float(arr[i, 1])) for i in order]
-
-
-def _draw_points(points, img, radius=5):
-    """功能：把拐点用红色实心圆标在图像上，用来肉眼核对位置。
-    输入：points：可迭代的 (x, y) 拐点元组；img：np.ndarray，单通道或三通道图，作为底图；
-          radius：int，红点半径(px)
-    输出：np.ndarray，uint8，BGR 三通道图，拐点处为红色实心圆
-    """
-    vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img.copy()  # 灰度底图转 BGR，彩色直接复制
-    for x, y in points:
-        cv2.circle(vis, (int(x), int(y)), radius, (0, 0, 255), -1)   # 红色实心圆(BGR)
-    return vis
 
 
 def _devide_area(img, area):
@@ -415,12 +500,11 @@ def _undistort_fisheye(img, K, D, balance=0.0):
     return undist[y0:y1, x0:x1]
 
 
-def image_processing(path=IMAGE_DIR,  calib_npz=CALIB_NPZ):
+def image_processing(path=IMAGE_DIR, calib_npz=CALIB_NPZ):
     """功能：批量处理文件夹内的 png，先做鱼眼去畸变，再提取每张图的四个拐点，按图片顺序存成 npz。
-    输入：path：str，图片文件夹路径；out_npz：str，结果 npz 保存路径；calib_npz：str，鱼眼标定结果(K/D)路径
+    输入：path：str，图片文件夹路径；calib_npz：str，鱼眼标定结果(K/D)路径
     输出：list，每个元素是该图四个拐点的 ((x, y), ...) 二维元组
     """
-    os.makedirs(DEBUG_DIR, exist_ok=True)                   # 确保拐点标红图保存目录存在
     def _file_index(f):                                     # 从文件名提取数字作排序键；无数字返回 0 兜底，避免 re.search 返回 None 报错
         m = re.search(r'\d+', os.path.basename(f))
         return int(m.group()) if m else 0
@@ -438,6 +522,7 @@ def image_processing(path=IMAGE_DIR,  calib_npz=CALIB_NPZ):
         return []                                           # 没有可读图，直接返回空结果
     map1, map2, y0, y1, x0, x1 = _prepare_undistort(K, D, probe_size, BALANCE)  # 循环外只算一次 map 与有效区包围盒，后续每张只 remap
     result = []
+    count = 1
     for file_path in files:
         img = cv2.imread(file_path)                          # 读 BGR 彩色图，只取红色通道作灰度
         if img is None:
@@ -446,20 +531,23 @@ def image_processing(path=IMAGE_DIR,  calib_npz=CALIB_NPZ):
         gray = img[:, :, 2]                                  # 红色通道(BGR 第 3 通道)
         gray = cv2.remap(gray, map1, map2, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)[y0:y1, x0:x1]  # 去畸变并裁黑边
-        blur = cv2.GaussianBlur(gray,(5,5),0)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, ADAPTIVE_BLOCK, ADAPTIVE_C)
         binary = _remove_small(binary)
         skeleton = _thin(binary)
         cycle = _extract_main_cycle(skeleton)               # 提取主闭合环的有序像素序列
-        cycle_img = np.zeros(gray.shape, np.uint8)          # 环的可视化：黑底白环，用于查看去分支后的环
-        if cycle is not None:
-            cycle_img[cycle[:, 0], cycle[:, 1]] = 255       # 把环像素(行,列)还原成图像
-            cv2.imwrite(os.path.join(DEBUG_DIR, "cycle_" + os.path.basename(file_path)), cycle_img)
-        points = _order_points(_corner_points_from_cycle(cycle))  # 沿环算方向角变化挑拐点
+        points = _order_points(_corner_points_from_cycle(cycle, gray=gray))  # 沿环经 Steger 亚像素直线拟合挑拐点
         result.append(tuple(points))
-        vis = _draw_points(points, gray)                    # 在去畸变灰度图上把拐点标红
-        cv2.imwrite(os.path.join(DEBUG_DIR, os.path.basename(file_path)), vis)
+        gray = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        for (x,y) in points:
+            cv2.circle(gray, (int(x), int(y)), 5, (0, 0, 255), -1)
+        
+        keep_path= r"C:\python\3D_project_3\_debug"
+        
+        path = os.path.join(keep_path,f"img_{count}.png")
+        count += 1
+        cv2.imwrite(path, gray)
         print(f"{os.path.basename(file_path)}：拐点 {len(points)} 个")
     return result
 

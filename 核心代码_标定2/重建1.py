@@ -17,6 +17,7 @@ import re
 import time
 import cv2
 import numpy as np
+from scipy.spatial import cKDTree
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -28,7 +29,6 @@ H_NPZ = r"C:\python\3D_project_3\核心代码_标定2\H.npz"                  # 
 Z_NPZ = r"C:\python\3D_project_3\核心代码_标定2\data\z\z.npz"          # z 坐标一维列表
 OUTPUT_PLY = r"C:\python\3D_project_3\核心代码_标定2\pointcloud_steger.ply"   # 输出 Steger 点云
 STANDARD_PLY = r"C:\python\3D_project_3\核心代码_标定2\pointcloud.ply"        # 覆盖标准点云
-DEBUG_DIR = r"C:\python\3D_project_3\_debug"                           # 输出可视化渲染图目录
 
 
 def _load_module(path, name):
@@ -42,16 +42,25 @@ def _load_module(path, name):
     return mod
 
 
-def _load_z(z_npz, n_files):
-    """读取 z 坐标序列，缺失则自动回退为等间距步进序列。"""
+def _load_z(z_npz, n_files, default_step=0.25):
+    """读取真实物理 z 坐标序列 (位移台标准步长 0.25mm)。
+    若 z.npz 中的帧数与实际图像数量有微小差异 (如 43 帧 vs 44 帧)，按 0.25mm 物理步长顺延补齐。
+    """
     if os.path.isfile(z_npz):
         data = np.load(z_npz)
         key = "z" if "z" in data.files else data.files[0]
         zs = np.asarray(data[key], np.float64).ravel()
         if len(zs) == n_files:
             return zs
-    print(f"提示：未找到匹配的 {z_npz}，使用默认等步进 z=0, 1, 2... {n_files-1} mm")
-    return np.arange(n_files, dtype=np.float64)
+        elif len(zs) > 1:
+            dz = float(zs[1] - zs[0]) if len(zs) > 1 else default_step
+            if len(zs) < n_files:
+                extra = [zs[-1] + dz * (i + 1) for i in range(n_files - len(zs))]
+                return np.concatenate([zs, extra])
+            else:
+                return zs[:n_files]
+    print(f"提示：未找到匹配的 {z_npz}，使用物理位移台标准等步进 z=0, 0.25, 0.5... {(n_files-1)*default_step:.2f} mm")
+    return np.arange(n_files, dtype=np.float64) * default_step
 
 
 def _pixels_to_xy(pix, H):
@@ -124,7 +133,6 @@ def render_pointcloud_images(pts, out_png):
 def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
                 out_ply=OUTPUT_PLY, proc_path=PROC_PATH):
     """主重建流程。"""
-    os.makedirs(DEBUG_DIR, exist_ok=True)
     proc = _load_module(proc_path, "image_proc_rebuild1")
     if proc is None:
         return None
@@ -134,6 +142,8 @@ def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
         return int(m.group()) if m else 0
 
     files = sorted(glob.glob(os.path.join(image_dir, "*.png")), key=_file_index)
+    if not files:
+        files = sorted(glob.glob(os.path.join(image_dir, "**", "*.png"), recursive=True), key=_file_index)
     if not files:
         print(f"文件夹内没有 png：{image_dir}")
         return None
@@ -148,17 +158,27 @@ def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
     print(f"==================================================")
 
     t0_all = time.time()
-    # 逐图执行 Steger 提取
+    # 逐图执行 Steger 优先 + 质心保底 + 连续拓扑提取
     points_list = proc.image_processing(image_dir, method="steger")
 
     clouds = []
+    total_burrs = 0
     for z, fp, points in zip(zs, files, points_list):
         if points is None or len(points) == 0:
             print(f"未提取到点：{os.path.basename(fp)}")
             continue
         pix = np.asarray(points, np.float64)[:, ::-1]  # [y, x] -> (u=列, v=行)
         xy = _pixels_to_xy(pix, H)                     # 现实平面 XY(mm)
-        xyz = np.column_stack((xy, np.full(len(xy), float(z))))
+
+        # 闭合性判定
+        d_close = np.hypot(xy[0, 0] - xy[-1, 0], xy[0, 1] - xy[-1, 1])
+        is_closed = (d_close <= 15.0)
+
+        # 【工序二】物理几何球半径自适应双边平滑 (物理微米限位 0.025mm + 端点锁定)
+        xy_smoothed = proc.edge_preserving_smooth(xy, is_closed=is_closed, search_radius=1.0, sigma_r=0.08, max_shift_mm=0.025)
+
+        # 严格保持原 Z 坐标
+        xyz = np.column_stack((xy_smoothed, np.full(len(xy_smoothed), float(z))))
         clouds.append(xyz)
 
     if not clouds:
@@ -166,6 +186,25 @@ def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
         return None
 
     pts = np.vstack(clouds)
+    # 【工序三】全空间各向同性 3D SOR (针对 dz ≈ 0.25mm, d_xy ≈ 0.24mm 的各向同性点云)
+    if len(pts) > 100:
+        k_3d = min(20, len(pts) - 1)
+        tree_3d = cKDTree(pts)
+        d_3d, _ = tree_3d.query(pts, k=k_3d + 1)
+        m_d3d = np.mean(d_3d[:, 1:], axis=1)
+        mu_3d = np.mean(m_d3d)
+        sig_3d = np.std(m_d3d)
+
+        # 边界感知保护：顶层和底层仅有单侧半空间邻域，绝对免除切顶削底误伤
+        z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
+        is_boundary = (pts[:, 2] <= z_min + 0.05) | (pts[:, 2] >= z_max - 0.05)
+        thresh_3d = np.where(is_boundary, mu_3d + 5.0 * sig_3d, mu_3d + 2.8 * sig_3d)
+
+        mask_3d = (m_d3d <= thresh_3d) | is_boundary
+        outliers_3d = int(np.sum(~mask_3d))
+        pts = pts[mask_3d]
+        print(f"3D SOR 全空间去噪完成: 剔除离群飞点 {outliers_3d} 个, 保留 {len(pts)} 个高精度点")
+
     t_total = time.time() - t0_all
 
     # 保存 PLY 点云文件
@@ -173,12 +212,13 @@ def reconstruct(image_dir=IMAGE_DIR, h_npz=H_NPZ, z_npz=Z_NPZ,
     _write_ply(pts, STANDARD_PLY)
     print(f"\n三维点云构建完成！")
     print(f"总点数: {len(pts)} 个三维点")
+
     print(f"总耗时: {t_total:.2f} 秒 (平均每帧 {(t_total/len(files))*1000:.1f} ms)")
     print(f"已导出 PLY 文件: {out_ply}")
     print(f"已同步更新: {STANDARD_PLY}")
 
     # 绘制高精度多视角可视化图像
-    render_out = os.path.join(DEBUG_DIR, "pointcloud_3d_view.png")
+    render_out = os.path.join(os.path.dirname(out_ply), "pointcloud_3d_view.png")
     render_pointcloud_images(pts, render_out)
 
     return out_ply

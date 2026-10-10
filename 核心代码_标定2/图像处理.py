@@ -402,28 +402,15 @@ def image_processing(path=IMAGE_DIR):
         blur = cv2.GaussianBlur(img,(5,5),0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, ADAPTIVE_BLOCK, ADAPTIVE_C)
-        binary = cv2.morphologyEx(binary,cv2.MORPH_OPEN,kernel)
-        cv2.namedWindow("img",cv2.WINDOW_NORMAL)
-        cv2.imshow("img",binary)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = _remove_small(binary, MIN_AREA)
-        cv2.imwrite(r"C:\python\3D_project_3\calib_images\binary.png",binary)
         skeleton = _thin(binary)
-        cv2.imwrite(r"_debug/skeleton.png",skeleton)
         pruned = _prune_and_simplify(skeleton)
-        cv2.imwrite("_debug/pruned.png",pruned)
-        cluster = _largest_cluster(pruned,100)
-        cv2.imwrite("_debug/cluster.png",cluster)
+        cluster = _largest_cluster(pruned, 100)
         result = _connect_endpoints(cluster)
-        cv2.imwrite("_debug/result.png",result)
         corners = _extract_corners(result)
         if len(corners):
             all_corners.append(corners)                         # 收集本图角点，稍后合并保存
-        vis = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)          # 转彩色图，便于把角点标红
-        for x, y in corners:
-            cv2.circle(vis, (int(x), int(y)), 3, (0, 0, 255), -1)  # 角点画红色实心圆
-        cv2.imwrite("_debug/corners.png", vis)
         print(f"角点数量：{len(corners)}")
     if all_corners:                                          # 所有图的角点合并成 (N,2) 后写入 points.npz
         pts = np.vstack(all_corners).astype(np.float64)

@@ -16,10 +16,10 @@ import numpy as np
 
 # ---------- 路径与参数（数值按需手改） ----------
 _IMGPROC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "图像处理_四点提取.py")  # 复用的图像处理模块(四点提取)
-IMAGE_DIR = r"C:\python\3D_project_3\images\images\images"                    # 多张待处理标定框照片文件夹
+IMAGE_DIR = r"C:\python\3D_project_3\images\images"                    # 多张待处理标定框照片文件夹
 CALIB_NPZ = r"C:\python\3D_project_3\calib_result1.npz"          # 鱼眼标定结果(K/D)
 XY_NPZ = r"C:\python\3D_project_3\xy.npz"                       # 位移台 xy 坐标(字段 points，(N,4,2))，按需改
-OUTPUT_NPZ = r"C:\python\3D_project_3\核心代码_标定2\H.npz"     # 单应矩阵 H 保存路径
+OUTPUT_NPZ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "H.npz")     # 单应矩阵 H 保存路径
 
 
 def _load_imgproc(imgproc_path=_IMGPROC_PATH):
