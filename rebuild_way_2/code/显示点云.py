@@ -9,10 +9,8 @@
 
 import os
 import sys
-
 import numpy as np
 import open3d as o3d
-
 _HERE = os.path.dirname(os.path.abspath(__file__))                     # 本文件所在目录
 DEFAULT_PLY = os.path.join(os.path.dirname(_HERE), "data", "pointcloud", "pointcloud_steger.ply")  # 默认点云文件路径
 
