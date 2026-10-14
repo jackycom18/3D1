@@ -78,13 +78,14 @@ def _thin(binary):
 
 def _degree(skel):
     """功能：计算骨架每个前景点的度数(8 邻域前景邻居数，不含自身)。
-    输入：skel：np.ndarray，uint8，0/1 骨架图
+    输入：skel：np.ndarray，uint8，0/1 或 0/255 骨架图
     输出：np.ndarray，int16，与输入同尺寸，前景点处为度数，背景为 0
     """
     h, w = skel.shape
-    conv = cv2.filter2D(skel, cv2.CV_16U, np.ones((3, 3), np.uint8))
+    skel_01 = (skel > 0).astype(np.uint8)
+    conv = cv2.filter2D(skel_01, cv2.CV_16U, np.ones((3, 3), np.uint8))
     deg = np.zeros((h, w), np.int16)
-    m = skel > 0
+    m = skel_01 > 0
     deg[m] = conv[m] - 1
     return deg
 
@@ -473,18 +474,17 @@ def _prepare_undistort(K, D, size, balance=0.0):
     """
     w, h = size                                                # Size 需按 (宽,高) 传入
     R = np.eye(3, dtype=np.float64)                            # 单位旋转，不额外旋转图像
-    Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-        K, D, (w, h), R, balance=balance)                      # 缩小焦距后的新内参，广角内容完整装入画布
+    # 修复：直接复用真实标定内参 K 构建投影矩阵，避免 OpenCV estimateNewCameraMatrixForUndistortRectify
+    # 在超广角四对角死角处数值求逆发散（算出的焦距缩小十几万倍导致图像全黑）。
+    # 通过缩放焦距(0.80~1.0)自适应保留完整视场：
+    Knew = K.copy()
+    f_scale = 0.80 if balance <= 0.0 else (0.80 + 0.20 * min(balance, 1.0))
+    Knew[0, 0] *= f_scale
+    Knew[1, 1] *= f_scale
+
     map1, map2 = cv2.fisheye.initUndistortRectifyMap(
         K, D, R, Knew, (w, h), cv2.CV_32FC1)                   # 重映射表，float 坐标便于后续判有效区
-    mask = cv2.remap(np.full((h, w), 255, np.uint8), map1, map2, cv2.INTER_NEAREST,
-                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)  # 全白图过一遍，得到有效区掩膜
-    ys, xs = np.nonzero(mask)                                  # 有效像素坐标，黑边处 mask 为 0
-    if ys.size == 0:                                           # 理论不触发，防御性返回全图包围盒
-        return map1, map2, 0, h, 0, w
-    y0, y1 = ys.min(), ys.max() + 1                            # 有效区域包围盒
-    x0, x1 = xs.min(), xs.max() + 1
-    return map1, map2, y0, y1, x0, x1
+    return map1, map2, 0, h, 0, w
 
 
 def _undistort_fisheye(img, K, D, balance=0.0):
@@ -531,10 +531,18 @@ def image_processing(path=IMAGE_DIR, calib_npz=CALIB_NPZ):
         gray = img[:, :, 2]                                  # 红色通道(BGR 第 3 通道)
         gray = cv2.remap(gray, map1, map2, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)[y0:y1, x0:x1]  # 去畸变并裁黑边
+        cv2.namedWindow("gray",cv2.WINDOW_NORMAL)
+        cv2.imshow("gray",gray);
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, ADAPTIVE_BLOCK, ADAPTIVE_C)
         binary = _remove_small(binary)
+        cv2.namedWindow("binary",cv2.WINDOW_NORMAL)
+        cv2.imshow("binary",binary);
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
         skeleton = _thin(binary)
         cycle = _extract_main_cycle(skeleton)               # 提取主闭合环的有序像素序列
         points = _order_points(_corner_points_from_cycle(cycle, gray=gray))  # 沿环经 Steger 亚像素直线拟合挑拐点

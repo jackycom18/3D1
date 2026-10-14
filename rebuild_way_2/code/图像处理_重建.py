@@ -51,15 +51,13 @@ def _get_undistort_maps(h, w, K, D, balance=0.0):
     key = (h, w, balance)
     if key not in _FISHEYE_CACHE:
         R = np.eye(3, dtype=np.float64)
-        Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-            K, D, (w, h), R, balance=balance)
+        Knew = K.copy()
+        f_scale = 0.80 if balance <= 0.0 else (0.80 + 0.20 * min(balance, 1.0))
+        Knew[0, 0] *= f_scale
+        Knew[1, 1] *= f_scale
         map1, map2 = cv2.fisheye.initUndistortRectifyMap(
             K, D, R, Knew, (w, h), cv2.CV_32FC1)
-        mask = cv2.remap(np.full((h, w), 255, np.uint8), map1, map2, cv2.INTER_NEAREST,
-                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        ys, xs = np.nonzero(mask)
-        crop = (ys.min(), ys.max() + 1, xs.min(), xs.max() + 1) if ys.size > 0 else (0, h, 0, w)
-        _FISHEYE_CACHE[key] = (map1, map2, crop)
+        _FISHEYE_CACHE[key] = (map1, map2, (0, h, 0, w))
     return _FISHEYE_CACHE[key]
 
 

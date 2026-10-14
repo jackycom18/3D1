@@ -13,8 +13,6 @@ import numpy as np
 import open3d as o3d
 _HERE = os.path.dirname(os.path.abspath(__file__))                     # 本文件所在目录
 DEFAULT_PLY = os.path.join(os.path.dirname(_HERE), "data", "pointcloud", "pointcloud_steger.ply")  # 默认点云文件路径
-
-
 def load_pointcloud(path):
     """功能：从 ply 或 npz 文件读取点云坐标为 (N,3) 数组。
     输入：path：str，点云文件路径（.ply 或 .npz）
